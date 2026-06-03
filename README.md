@@ -22,6 +22,7 @@ an IP/host or text with an IP inside it, pressing Enter uses that value.
 - ISP, org, AS number/name, reverse hostname
 - Mobile/proxy/hosting flags from ip-api
 - Quick links: BGP, Censys, IPinfo, IPQS, More
+- DNS fallback for filtered `ip-api.com` lookups via public DNS-over-HTTPS
 
 ## Requirements
 

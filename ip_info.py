@@ -15,10 +15,16 @@ import requests
 # Force UTF-8 output on Windows.
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-API_URL = (
-    "http://ip-api.com/json/{ip}"
+API_HOST = "ip-api.com"
+API_PATH = (
+    "/json/{ip}"
     "?fields=status,message,country,countryCode,regionName,city,zip,lat,lon,"
     "timezone,isp,org,as,asname,reverse,mobile,proxy,hosting,query"
+)
+API_URL = f"http://{API_HOST}{API_PATH}"
+DOH_URLS = (
+    "https://cloudflare-dns.com/dns-query?name={host}&type=A",
+    "https://dns.google/resolve?name={host}&type=A",
 )
 
 IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
@@ -28,6 +34,31 @@ EXIT_WORDS = {"q", "quit", "exit", "й", "выйти"}
 
 class IpInfoError(RuntimeError):
     """User-facing lookup error."""
+
+
+def request_json(url: str, *, headers: dict[str, str] | None = None) -> dict:
+    resp = requests.get(url, headers=headers, timeout=8)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def resolve_public_a_record(host: str) -> str | None:
+    for url_template in DOH_URLS:
+        url = url_template.format(host=host)
+        try:
+            data = request_json(url, headers={"Accept": "application/dns-json"})
+        except (requests.RequestException, ValueError):
+            continue
+
+        for answer in data.get("Answer", []):
+            if answer.get("type") != 1:
+                continue
+            value = answer.get("data", "")
+            ip = valid_ip(value)
+            if ip and ip != "0.0.0.0":
+                return ip
+
+    return None
 
 
 def bool_mark(value: object) -> str:
@@ -148,18 +179,50 @@ def clipboard_target() -> str | None:
 
 
 def get_ip_info(ip: str) -> dict:
+    errors: list[str] = []
     try:
-        resp = requests.get(API_URL.format(ip=ip), timeout=8)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.ConnectionError as exc:
-        raise IpInfoError("No internet connection or API is unreachable.") from exc
+        return request_json(API_URL.format(ip=ip))
     except requests.exceptions.Timeout as exc:
-        raise IpInfoError("Request timed out.") from exc
+        errors.append("ip-api.com timed out")
+        last_error: Exception = exc
     except requests.exceptions.HTTPError as exc:
-        raise IpInfoError(f"HTTP error: {exc}") from exc
+        errors.append(f"ip-api.com HTTP error: {exc}")
+        last_error = exc
+    except requests.exceptions.ConnectionError as exc:
+        errors.append(f"ip-api.com connection error: {exc}")
+        last_error = exc
+    except requests.RequestException as exc:
+        errors.append(f"ip-api.com request error: {exc}")
+        last_error = exc
     except ValueError as exc:
-        raise IpInfoError("API returned invalid JSON.") from exc
+        errors.append("ip-api.com returned invalid JSON")
+        last_error = exc
+
+    direct_ip = resolve_public_a_record(API_HOST)
+    if direct_ip:
+        direct_url = f"http://{direct_ip}{API_PATH}".format(ip=ip)
+        try:
+            return request_json(direct_url, headers={"Host": API_HOST})
+        except requests.exceptions.Timeout as exc:
+            errors.append(f"{API_HOST} via {direct_ip} timed out")
+            last_error = exc
+        except requests.exceptions.HTTPError as exc:
+            errors.append(f"{API_HOST} via {direct_ip} HTTP error: {exc}")
+            last_error = exc
+        except requests.exceptions.ConnectionError as exc:
+            errors.append(f"{API_HOST} via {direct_ip} connection error: {exc}")
+            last_error = exc
+        except requests.RequestException as exc:
+            errors.append(f"{API_HOST} via {direct_ip} request error: {exc}")
+            last_error = exc
+        except ValueError as exc:
+            errors.append(f"{API_HOST} via {direct_ip} returned invalid JSON")
+            last_error = exc
+    else:
+        errors.append(f"public DNS could not resolve {API_HOST}")
+
+    details = "; ".join(errors)
+    raise IpInfoError(f"IP lookup API is unreachable. Details: {details}") from last_error
 
 
 def resolve_hostname(target: str) -> str | None:
